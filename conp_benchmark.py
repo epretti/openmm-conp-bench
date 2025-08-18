@@ -8,7 +8,6 @@ import numpy
 import openmm.app
 import pickle
 import time
-import tqdm
 
 # Dimensionless constants for geometry generation.
 SQRT_2 = 2.0 ** 0.5
@@ -70,7 +69,7 @@ N_REPORT = 100
 N_EQUIL = 100000
 N_PROD = 100000
 F_WARM = 0.1
-PLATFORM = "OpenCL"
+PLATFORM = None
 
 def generate_fcc_lattice(n_x, n_y, n_z):
     """
@@ -317,7 +316,10 @@ def integrate_openmm_system(system, topology, positions, n_equil, n_prod, t_benc
     else:
         raise ValueError
     integrator = openmm.LangevinMiddleIntegrator(TEMP, 1.0 / T_LANGEVIN, T_STEP)
-    context = openmm.Context(system, integrator, openmm.Platform.getPlatformByName(PLATFORM))
+    if PLATFORM is None:
+        context = openmm.Context(system, integrator)
+    else:
+        context = openmm.Context(system, integrator, openmm.Platform.getPlatformByName(PLATFORM))
     context.setPositions(positions)
 
     openmm.app.PDBFile.writeFile(topology, positions, f"{prefix}.pdb")
@@ -341,7 +343,7 @@ def integrate_openmm_system(system, topology, positions, n_equil, n_prod, t_benc
         for i_electrode in range(conp.getNumElectrodes()):
             groups.append(sorted(conp.getElectrodeParameters(i_electrode)[0]))
 
-    for i_equil in tqdm.trange(0, n_equil, N_REPORT):
+    for i_equil in range(0, n_equil, N_REPORT):
         integrator.step(min(N_REPORT, n_equil - i_equil))
 
     with open(f"{prefix}.log", "w") as log_file, open(f"{prefix}.dcd", "wb") as dcd_file:
@@ -367,14 +369,14 @@ def integrate_openmm_system(system, topology, positions, n_equil, n_prod, t_benc
             dcd_writer.writeModel(state.getPositions(), periodicBoxVectors=state.getPeriodicBoxVectors())
 
         if n_prod is not None and t_bench is None:
-            for i_prod in tqdm.trange(0, n_prod, N_REPORT):
+            for i_prod in range(0, n_prod, N_REPORT):
                 n_step = min(N_REPORT, n_prod - i_prod)
                 integrator.step(n_step)
                 make_report(i_prod, n_step)
         elif n_prod is None and t_bench is not None:
             # Warm up.
             t_start = time.perf_counter_ns()
-            for i_prod in tqdm.tqdm(itertools.count(step=N_REPORT)):
+            for i_prod in itertools.count(step=N_REPORT):
                 integrator.step(N_REPORT)
                 make_report(i_prod, N_REPORT)
                 if (time.perf_counter_ns() - t_start) / 10 ** 9 > t_bench * F_WARM:
@@ -383,7 +385,7 @@ def integrate_openmm_system(system, topology, positions, n_equil, n_prod, t_benc
             # Benchmark.
             t_start = time.perf_counter_ns()
             bench_steps = 0
-            for i_prod in tqdm.tqdm(itertools.count(step=N_REPORT)):
+            for i_prod in itertools.count(step=N_REPORT):
                 integrator.step(N_REPORT)
                 bench_steps += N_REPORT
                 make_report(i_prod, N_REPORT)
@@ -447,6 +449,8 @@ def prepare_conp_systems():
     prepare_conp_system(15000, 30000, 3.0, False, True)
 
 def main():
+    global PLATFORM
+
     benchmarks = {
         "base":        lambda t_bench, use_matrix: simulate_conp_system( 3000,  6000, 3.0, False, True,  use_matrix, 10.0, None, t_bench),
         "unfrozen":    lambda t_bench            : simulate_conp_system( 3000,  6000, 3.0, False, False, False,      10.0, None, t_bench),
@@ -466,7 +470,10 @@ def main():
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--time", type=float, default=60.0)
     parser.add_argument("--method", choices=["matrix", "cg"], required=True)
+    parser.add_argument("--platform")
     args = parser.parse_args()
+
+    PLATFORM = args.platform
     
     t_bench = args.time
     use_matrix = args.method == "matrix"
