@@ -7,6 +7,7 @@ import itertools
 import numpy
 import openmm.app
 import pickle
+import scipy
 import time
 
 # Dimensionless constants for geometry generation.
@@ -296,7 +297,7 @@ def generate_openmm_system(l_x, l_y, l_z, xyz_pt, xyz_water, xyz_na, xyz_cl, n_z
         xyz_cl.value_in_unit(openmm.unit.nanometer)
     )) * openmm.unit.nanometer
 
-def integrate_openmm_system(system, topology, positions, n_equil, n_prod, t_bench, prefix, barostat_kind, do_minimize):
+def integrate_openmm_system(system, topology, positions, n_equil, n_prod, t_bench, n_repeat, prefix, barostat_kind, do_minimize):
     """
     Integrates an OpenMM system starting from the specified positions for a
     given number of equilibration and production steps, and writes output files
@@ -383,21 +384,23 @@ def integrate_openmm_system(system, topology, positions, n_equil, n_prod, t_benc
                     break
 
             # Benchmark.
-            t_start = time.perf_counter_ns()
-            bench_steps = 0
-            for i_prod in itertools.count(step=N_REPORT):
-                integrator.step(N_REPORT)
-                bench_steps += N_REPORT
-                make_report(i_prod, N_REPORT)
-                t_elapsed = (time.perf_counter_ns() - t_start) / 10 ** 9
-                if t_elapsed > t_bench:
-                    break
+            bench_results = []
+            for i_repeat in range(n_repeat):
+                print(f"Benchmarking (repeat {i_repeat + 1}/{n_repeat})...")
+                bench_steps = 0
+                t_start = time.perf_counter_ns()
+                for i_prod in itertools.count(step=N_REPORT):
+                    integrator.step(N_REPORT)
+                    bench_steps += N_REPORT
+                    make_report(i_prod, N_REPORT)
+                    t_elapsed = (time.perf_counter_ns() - t_start) / 10 ** 9
+                    if t_elapsed > t_bench:
+                        break
+                bench_results.append((bench_steps * T_STEP).value_in_unit(openmm.unit.nanosecond) / (t_elapsed / 86400))
+                print(f"    {bench_results[-1]:.3f} ns/day")
 
             print(f"Benchmarking results for {prefix}:")
-            print(f"    Simulated steps:          {bench_steps}")
-            print(f"    Elapsed time (s-wall):    {t_elapsed}")
-            print(f"    Cost (ns-wall/step-sim):  {round(t_elapsed * 10 ** 9 / bench_steps)}")
-            print(f"    Speed (ns-sim/day-wall):  {(bench_steps * T_STEP).value_in_unit(openmm.unit.nanosecond) / (t_elapsed / 86400):.3f}")
+            print(f"    {numpy.mean(bench_results):.3f} +/- {scipy.stats.sem(bench_results) * scipy.stats.t.isf(0.025, n_repeat - 1):.3f} ns/day (95%CI)")
 
         else:
             raise RuntimeError
@@ -416,12 +419,12 @@ def prepare_conp_system(n_electrode, n_electrolyte, aspect_ratio, double_cell, f
 
     l_x, l_y, l_z, xyz_pt, xyz_water, xyz_na, xyz_cl, n_z, electrode, layer = create_electrode_system(n_electrode, n_electrolyte, aspect_ratio, double_cell, l_z_target)
     system, topology, positions = generate_openmm_system(l_x, l_y, l_z, xyz_pt, xyz_water, xyz_na, xyz_cl, n_z, electrode, layer, freeze_all, False)
-    positions = integrate_openmm_system(system, topology, positions, N_EQUIL, N_PROD, None, f"{prefix}_equilibrate_nvt", 0, True)
+    positions = integrate_openmm_system(system, topology, positions, N_EQUIL, N_PROD, None, 1, f"{prefix}_equilibrate_nvt", 0, True)
 
     with open(f"{prefix}_state.dat", "wb") as file:
         pickle.dump((l_x, l_y, l_z, xyz_pt, xyz_water, xyz_na, xyz_cl, n_z, electrode, layer, positions), file)
 
-def simulate_conp_system(n_electrode, n_electrolyte, aspect_ratio, double_cell, freeze_all, use_matrix, potential_v, n_prod, t_bench):
+def simulate_conp_system(n_electrode, n_electrolyte, aspect_ratio, double_cell, freeze_all, use_matrix, potential_v, n_prod, t_bench, n_repeat):
     prefix = f"system_{n_electrode}_{n_electrolyte}_{aspect_ratio}_{int(double_cell)}"
 
     with open(f"{prefix}_1_state.dat", "rb") as file:
@@ -435,7 +438,7 @@ def simulate_conp_system(n_electrode, n_electrolyte, aspect_ratio, double_cell, 
     if not double_cell:
         conp.setExternalField((0.0, 0.0, -potential_v * VOLT / l_z))
 
-    integrate_openmm_system(system, topology, positions, 0, n_prod, t_bench, f"{prefix}_{int(freeze_all)}_{int(use_matrix)}_run_{potential_v}", 0, False)
+    integrate_openmm_system(system, topology, positions, 0, n_prod, t_bench, n_repeat, f"{prefix}_{int(freeze_all)}_{int(use_matrix)}_run_{potential_v}", 0, False)
 
 def prepare_conp_systems():
     # n_electrode, n_electrolyte, aspect_ratio, double_cell, freeze_all
@@ -452,23 +455,24 @@ def main():
     global PLATFORM
 
     benchmarks = {
-        "base":        lambda t_bench, use_matrix: simulate_conp_system( 3000,  6000, 3.0, False, True,  use_matrix, 10.0, None, t_bench),
-        "unfrozen":    lambda t_bench            : simulate_conp_system( 3000,  6000, 3.0, False, False, False,      10.0, None, t_bench),
-        "zero":        lambda t_bench, use_matrix: simulate_conp_system( 3000,  6000, 3.0, False, True,  use_matrix, 0.0,  None, t_bench),
-        "double":      lambda t_bench, use_matrix: simulate_conp_system( 3000,  6000, 3.0, True,  True,  use_matrix, 10.0, None, t_bench),
-        "short":       lambda t_bench, use_matrix: simulate_conp_system( 3000,  6000, 1.5, False, True,  use_matrix, 10.0, None, t_bench),
-        "long":        lambda t_bench, use_matrix: simulate_conp_system( 3000,  6000, 6.0, False, True,  use_matrix, 10.0, None, t_bench),
-        "electrolyte": lambda t_bench, use_matrix: simulate_conp_system( 1000,  8000, 3.0, False, True,  use_matrix, 10.0, None, t_bench),
-        "electrode":   lambda t_bench, use_matrix: simulate_conp_system( 5000,  4000, 3.0, False, True,  use_matrix, 10.0, None, t_bench),
-        "small":       lambda t_bench, use_matrix: simulate_conp_system( 1000,  2000, 3.0, False, True,  use_matrix, 10.0, None, t_bench),
-        "large":       lambda t_bench, use_matrix: simulate_conp_system(15000, 30000, 3.0, False, True,  use_matrix, 10.0, None, t_bench),
+        "base":        lambda t_bench, n_repeat, use_matrix: simulate_conp_system( 3000,  6000, 3.0, False, True,  use_matrix, 10.0, None, t_bench, n_repeat),
+        "unfrozen":    lambda t_bench, n_repeat            : simulate_conp_system( 3000,  6000, 3.0, False, False, False,      10.0, None, t_bench, n_repeat),
+        "zero":        lambda t_bench, n_repeat, use_matrix: simulate_conp_system( 3000,  6000, 3.0, False, True,  use_matrix, 0.0,  None, t_bench, n_repeat),
+        "double":      lambda t_bench, n_repeat, use_matrix: simulate_conp_system( 3000,  6000, 3.0, True,  True,  use_matrix, 10.0, None, t_bench, n_repeat),
+        "short":       lambda t_bench, n_repeat, use_matrix: simulate_conp_system( 3000,  6000, 1.5, False, True,  use_matrix, 10.0, None, t_bench, n_repeat),
+        "long":        lambda t_bench, n_repeat, use_matrix: simulate_conp_system( 3000,  6000, 6.0, False, True,  use_matrix, 10.0, None, t_bench, n_repeat),
+        "electrolyte": lambda t_bench, n_repeat, use_matrix: simulate_conp_system( 1000,  8000, 3.0, False, True,  use_matrix, 10.0, None, t_bench, n_repeat),
+        "electrode":   lambda t_bench, n_repeat, use_matrix: simulate_conp_system( 5000,  4000, 3.0, False, True,  use_matrix, 10.0, None, t_bench, n_repeat),
+        "small":       lambda t_bench, n_repeat, use_matrix: simulate_conp_system( 1000,  2000, 3.0, False, True,  use_matrix, 10.0, None, t_bench, n_repeat),
+        "large":       lambda t_bench, n_repeat, use_matrix: simulate_conp_system(15000, 30000, 3.0, False, True,  use_matrix, 10.0, None, t_bench, n_repeat),
     }
 
     parser = argparse.ArgumentParser()
     for benchmark_name in benchmarks:
         parser.add_argument(f"--{benchmark_name}", action="store_true")
     parser.add_argument("--all", action="store_true")
-    parser.add_argument("--time", type=float, default=60.0)
+    parser.add_argument("--time", type=float, default=10.0)
+    parser.add_argument("--repeat", type=int, default=10)
     parser.add_argument("--method", choices=["matrix", "cg"], required=True)
     parser.add_argument("--platform")
     args = parser.parse_args()
@@ -476,29 +480,30 @@ def main():
     PLATFORM = args.platform
     
     t_bench = args.time
+    n_repeat = args.repeat
     use_matrix = args.method == "matrix"
 
     if args.all:
         for benchmark_name, benchmark_function in benchmarks.items():
             print(benchmark_name)
-            supports_use_matrix = benchmark_function.__code__.co_argcount > 1
+            supports_use_matrix = benchmark_function.__code__.co_argcount > 2
             if use_matrix and not supports_use_matrix:
                 continue
             if supports_use_matrix:
-                benchmark_function(t_bench, use_matrix)
+                benchmark_function(t_bench, n_repeat, use_matrix)
             else:
-                benchmark_function(t_bench)
+                benchmark_function(t_bench, n_repeat)
     else:
         for benchmark_name, benchmark_function in benchmarks.items():
             if getattr(args, benchmark_name):
                 print(benchmark_name)
-                supports_use_matrix = benchmark_function.__code__.co_argcount > 1
+                supports_use_matrix = benchmark_function.__code__.co_argcount > 2
                 if use_matrix and not supports_use_matrix:
                     raise ValueError(benchmark_name)
                 if supports_use_matrix:
-                    benchmark_function(t_bench, use_matrix)
+                    benchmark_function(t_bench, n_repeat, use_matrix)
                 else:
-                    benchmark_function(t_bench)
+                    benchmark_function(t_bench, n_repeat)
 
 
 if __name__ == "__main__":
