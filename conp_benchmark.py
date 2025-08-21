@@ -467,14 +467,17 @@ def main():
         "large":       lambda t_bench, n_repeat, use_matrix: simulate_conp_system(15000, 30000, 3.0, False, True,  use_matrix, 10.0, None, t_bench, n_repeat),
     }
 
+    platform_choices = [openmm.Platform.getPlatform(index).getName() for index in range(openmm.Platform.getNumPlatforms())]
+
     parser = argparse.ArgumentParser()
+    parser.add_argument("--platform", choices=platform_choices, help="OpenMM platform name to use")
+    parser.add_argument("--method", choices=["matrix", "cg"], required=True, help="solver to run")
+    parser.add_argument("--time", type=float, default=10.0, help="approximate time to run per measurement")
+    parser.add_argument("--repeat", type=int, default=10, help="number of measurements per test")
+    parser.add_argument("--all", action="store_true", help="run all benchmarks (may take several minutes with default settings)")
     for benchmark_name in benchmarks:
-        parser.add_argument(f"--{benchmark_name}", action="store_true")
-    parser.add_argument("--all", action="store_true")
-    parser.add_argument("--time", type=float, default=10.0)
-    parser.add_argument("--repeat", type=int, default=10)
-    parser.add_argument("--method", choices=["matrix", "cg"], required=True)
-    parser.add_argument("--platform")
+        parser.add_argument(f"--{benchmark_name}", action="store_true", help=f"run {benchmark_name!r} benchmark")
+
     args = parser.parse_args()
 
     PLATFORM = args.platform
@@ -504,7 +507,6 @@ def main():
                     benchmark_function(t_bench, n_repeat, use_matrix)
                 else:
                     benchmark_function(t_bench, n_repeat)
-
 
 if __name__ == "__main__":
     main()
